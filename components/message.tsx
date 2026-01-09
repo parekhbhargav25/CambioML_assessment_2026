@@ -154,6 +154,15 @@ const PurePreviewMessage = ({
                         break;
                     }
 
+                    const result = part.toolInvocation.result;
+                    const hasImageResult =
+                      typeof result === "object" &&
+                      result !== null &&
+                      "type" in result &&
+                      result.type === "image" &&
+                      "data" in result &&
+                      typeof result.data === "string";
+
                     return (
                       <motion.div
                         initial={{ y: 5, opacity: 0 }}
@@ -197,16 +206,16 @@ const PurePreviewMessage = ({
                           </div>
                         </div>
                         {state === "result" ? (
-                          part.toolInvocation.result.type === "image" && (
+                          hasImageResult ? (
                             <div className="p-2">
                               {/* eslint-disable-next-line @next/next/no-img-element */}
                               <img
-                                src={`data:image/png;base64,${part.toolInvocation.result.data}`}
+                                src={`data:image/png;base64,${result.data}`}
                                 alt="Generated Image"
                                 className="w-full aspect-[1024/768] rounded-sm"
                               />
                             </div>
-                          )
+                          ) : null
                         ) : action === "screenshot" ? (
                           <div className="w-full aspect-[1024/768] rounded-sm bg-zinc-200 dark:bg-zinc-800 animate-pulse"></div>
                         ) : null}

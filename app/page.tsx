@@ -4,7 +4,8 @@ import { PreviewMessage } from "@/components/message";
 import { getDesktopURL } from "@/lib/e2b/utils";
 import { useScrollToBottom } from "@/lib/use-scroll-to-bottom";
 import { useChat } from "@ai-sdk/react";
-import { useEffect, useState } from "react";
+import type { Message } from "ai";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { Input } from "@/components/input";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
@@ -16,16 +17,123 @@ import {
   ResizablePanel,
   ResizablePanelGroup,
 } from "@/components/ui/resizable";
-import { ABORTED } from "@/lib/utils";
+import { ABORTED, cn } from "@/lib/utils";
+import {
+  deriveStatusFromResult,
+  eventReducer,
+  getEventType,
+  initialEventState,
+  parseToolPayload,
+  parseToolResult,
+  type ToolEvent,
+  type ToolEventStatus,
+  type ToolName,
+} from "@/lib/agent-events";
+import { VncViewer } from "@/components/vnc-viewer";
+import { Plus, Trash2 } from "lucide-react";
+
+const STORAGE_KEY = "computer-use:sessions";
+
+type ChatSession = {
+  id: string;
+  title: string;
+  messages: Message[];
+  createdAt: number;
+  updatedAt: number;
+};
+
+type StoredSessions = {
+  sessions: ChatSession[];
+  activeSessionId: string | null;
+};
+
+type MessagePart = NonNullable<Message["parts"]>[number];
+
+type ToolInvocationPart = MessagePart & {
+  type: "tool-invocation";
+  toolInvocation: {
+    toolCallId: string;
+    toolName: string;
+    state: "call" | "result";
+    args: unknown;
+    result?: unknown;
+  };
+};
+
+const isToolInvocationPart = (
+  part: MessagePart,
+): part is ToolInvocationPart => part.type === "tool-invocation";
+
+const createSessionId = () => {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return crypto.randomUUID();
+  }
+  return `session-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+};
+
+const extractMessageText = (message: Message): string | undefined => {
+  if (typeof message.content === "string") return message.content;
+  const textPart = message.parts?.find(
+    (part) => part.type === "text" && typeof part.text === "string",
+  );
+  return textPart?.text;
+};
+
+const deriveSessionTitle = (messages: Message[], fallback: string) => {
+  const firstUserMessage = messages.find((message) => message.role === "user");
+  const text = firstUserMessage ? extractMessageText(firstUserMessage) : undefined;
+  if (!text) return fallback;
+  return text.trim().slice(0, 48) || fallback;
+};
+
+const formatTimestamp = (timestamp: number) =>
+  new Date(timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+
+const formatDuration = (durationMs?: number) => {
+  if (durationMs === undefined) return "--";
+  if (durationMs < 1000) return `${durationMs}ms`;
+  return `${(durationMs / 1000).toFixed(1)}s`;
+};
+
+const getStatusTone = (status: ToolEventStatus) => {
+  switch (status) {
+    case "running":
+      return "text-amber-600";
+    case "success":
+      return "text-emerald-600";
+    case "aborted":
+      return "text-orange-600";
+    case "error":
+      return "text-rose-600";
+    default:
+      return "text-zinc-600";
+  }
+};
+
+const normalizeToolName = (toolName: string): ToolName => {
+  if (toolName === "computer" || toolName === "bash") return toolName;
+  return "unknown";
+};
 
 export default function Chat() {
-  // Create separate refs for mobile and desktop to ensure both scroll properly
   const [desktopContainerRef, desktopEndRef] = useScrollToBottom();
-  const [mobileContainerRef, mobileEndRef] = useScrollToBottom();
-
   const [isInitializing, setIsInitializing] = useState(true);
   const [streamUrl, setStreamUrl] = useState<string | null>(null);
   const [sandboxId, setSandboxId] = useState<string | null>(null);
+  const [mobileView, setMobileView] = useState<"chat" | "desktop">("chat");
+
+  const [sessions, setSessions] = useState<ChatSession[]>([]);
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [hasHydrated, setHasHydrated] = useState(false);
+  const sessionsRef = useRef<ChatSession[]>([]);
+
+  const [eventState, dispatchEvent] = useReducer(
+    eventReducer,
+    initialEventState,
+  );
+  const seenCallsRef = useRef<Set<string>>(new Set());
+  const seenResultsRef = useRef<Set<string>>(new Set());
+  const callStartRef = useRef<Record<string, number>>({});
 
   const {
     messages,
@@ -84,11 +192,10 @@ export default function Chat() {
 
   const isLoading = status !== "ready";
 
-  const refreshDesktop = async () => {
+  const refreshDesktop = useCallback(async () => {
     try {
       setIsInitializing(true);
       const { streamUrl, id } = await getDesktopURL(sandboxId || undefined);
-      // console.log("Refreshed desktop connection with ID:", id);
       setStreamUrl(streamUrl);
       setSandboxId(id);
     } catch (err) {
@@ -96,59 +203,45 @@ export default function Chat() {
     } finally {
       setIsInitializing(false);
     }
-  };
+  }, [sandboxId]);
 
-  // Kill desktop on page close
   useEffect(() => {
     if (!sandboxId) return;
 
-    // Function to kill the desktop - just one method to reduce duplicates
     const killDesktop = () => {
       if (!sandboxId) return;
-
-      // Use sendBeacon which is best supported across browsers
       navigator.sendBeacon(
         `/api/kill-desktop?sandboxId=${encodeURIComponent(sandboxId)}`,
       );
     };
 
-    // Detect iOS / Safari
     const isIOS =
       /iPad|iPhone|iPod/.test(navigator.userAgent) ||
       (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
     const isSafari = /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
 
-    // Choose exactly ONE event handler based on the browser
     if (isIOS || isSafari) {
-      // For Safari on iOS, use pagehide which is most reliable
       window.addEventListener("pagehide", killDesktop);
 
       return () => {
         window.removeEventListener("pagehide", killDesktop);
-        // Also kill desktop when component unmounts
-        killDesktop();
-      };
-    } else {
-      // For all other browsers, use beforeunload
-      window.addEventListener("beforeunload", killDesktop);
-
-      return () => {
-        window.removeEventListener("beforeunload", killDesktop);
-        // Also kill desktop when component unmounts
         killDesktop();
       };
     }
+
+    window.addEventListener("beforeunload", killDesktop);
+
+    return () => {
+      window.removeEventListener("beforeunload", killDesktop);
+      killDesktop();
+    };
   }, [sandboxId]);
 
   useEffect(() => {
-    // Initialize desktop and get stream URL when the component mounts
     const init = async () => {
       try {
         setIsInitializing(true);
-
-        // Use the provided ID or create a new one
         const { streamUrl, id } = await getDesktopURL(sandboxId ?? undefined);
-
         setStreamUrl(streamUrl);
         setSandboxId(id);
       } catch (err) {
@@ -163,62 +256,298 @@ export default function Chat() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  return (
-    <div className="flex h-dvh relative">
-      {/* Mobile/tablet banner */}
-      <div className="flex items-center justify-center fixed left-1/2 -translate-x-1/2 top-5 shadow-md text-xs mx-auto rounded-lg h-8 w-fit bg-blue-600 text-white px-3 py-2 text-left z-50 xl:hidden">
-        <span>Headless mode</span>
+  useEffect(() => {
+    sessionsRef.current = sessions;
+  }, [sessions]);
+
+  useEffect(() => {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) {
+      try {
+        const parsed = JSON.parse(raw) as StoredSessions;
+        if (parsed.sessions?.length) {
+          setSessions(parsed.sessions);
+          const nextActiveId =
+            parsed.activeSessionId ?? parsed.sessions[0].id ?? null;
+          setActiveSessionId(nextActiveId);
+          const active = parsed.sessions.find(
+            (session) => session.id === nextActiveId,
+          );
+          setMessages(active?.messages ?? []);
+          setHasHydrated(true);
+          return;
+        }
+      } catch (error) {
+        console.error("Failed to parse stored sessions:", error);
+      }
+    }
+
+    const newSession: ChatSession = {
+      id: createSessionId(),
+      title: "New session",
+      messages: [],
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    setSessions([newSession]);
+    setActiveSessionId(newSession.id);
+    setMessages([]);
+    setHasHydrated(true);
+  }, [setMessages]);
+
+  useEffect(() => {
+    if (!hasHydrated) return;
+    const payload: StoredSessions = {
+      sessions,
+      activeSessionId,
+    };
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+  }, [sessions, activeSessionId, hasHydrated]);
+
+  useEffect(() => {
+    if (!hasHydrated || !activeSessionId) return;
+    const active = sessionsRef.current.find(
+      (session) => session.id === activeSessionId,
+    );
+    if (!active) return;
+    setMessages(active.messages ?? []);
+  }, [activeSessionId, hasHydrated, setMessages]);
+
+  useEffect(() => {
+    if (!hasHydrated || !activeSessionId) return;
+
+    setSessions((prev) =>
+      prev.map((session) => {
+        if (session.id !== activeSessionId) return session;
+        const title = deriveSessionTitle(messages, session.title);
+        return {
+          ...session,
+          title,
+          messages,
+          updatedAt: Date.now(),
+        };
+      }),
+    );
+  }, [messages, activeSessionId, hasHydrated]);
+
+  const createSession = useCallback(() => {
+    const newSession: ChatSession = {
+      id: createSessionId(),
+      title: "New session",
+      messages: [],
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    setSessions((prev) => [newSession, ...prev]);
+    setActiveSessionId(newSession.id);
+    setMessages([]);
+  }, [setMessages]);
+
+  const deleteSession = useCallback(
+    (sessionId: string) => {
+      setSessions((prev) => prev.filter((session) => session.id !== sessionId));
+      if (sessionId !== activeSessionId) return;
+
+      const remaining = sessionsRef.current.filter(
+        (session) => session.id !== sessionId,
+      );
+      const nextSession = remaining[0];
+      if (!nextSession) {
+        const newSession: ChatSession = {
+          id: createSessionId(),
+          title: "New session",
+          messages: [],
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        };
+        setSessions([newSession]);
+        setActiveSessionId(newSession.id);
+        setMessages([]);
+        return;
+      }
+      setActiveSessionId(nextSession.id);
+      setMessages(nextSession.messages);
+    },
+    [activeSessionId, setMessages],
+  );
+
+  useEffect(() => {
+    if (!hasHydrated) return;
+    dispatchEvent({ type: "reset" });
+    seenCallsRef.current = new Set();
+    seenResultsRef.current = new Set();
+    callStartRef.current = {};
+  }, [activeSessionId, hasHydrated]);
+
+  useEffect(() => {
+    if (!hasHydrated) return;
+
+    messages.forEach((message) => {
+      message.parts?.forEach((part) => {
+        if (!isToolInvocationPart(part)) return;
+
+        const { toolCallId, toolName, state, args, result } =
+          part.toolInvocation;
+        if (!toolCallId) return;
+
+        if (state === "call" && !seenCallsRef.current.has(toolCallId)) {
+          seenCallsRef.current.add(toolCallId);
+          const timestamp = Date.now();
+          callStartRef.current[toolCallId] = timestamp;
+
+          dispatchEvent({
+            type: "register-call",
+            event: {
+              id: toolCallId,
+              toolName: normalizeToolName(toolName),
+              timestamp,
+              status: "running",
+              payload: parseToolPayload(toolName, args),
+            },
+          });
+        }
+
+        if (state === "result" && !seenResultsRef.current.has(toolCallId)) {
+          seenResultsRef.current.add(toolCallId);
+          const startedAt = callStartRef.current[toolCallId] ?? Date.now();
+          const parsedResult = parseToolResult(result);
+          const status = deriveStatusFromResult(parsedResult);
+
+          dispatchEvent({
+            type: "register-result",
+            id: toolCallId,
+            status,
+            durationMs: Math.max(0, Date.now() - startedAt),
+            result: parsedResult,
+          });
+        }
+      });
+    });
+  }, [messages, hasHydrated]);
+
+  const events = useMemo<ToolEvent[]>(
+    () =>
+      eventState.order
+        .map((id) => eventState.byId[id])
+        .filter((event): event is ToolEvent => Boolean(event)),
+    [eventState],
+  );
+
+  const eventCounts = useMemo(() => {
+    return events.reduce<Record<string, number>>((acc, event) => {
+      const type = getEventType(event);
+      acc[type] = (acc[type] ?? 0) + 1;
+      return acc;
+    }, {});
+  }, [events]);
+
+  const agentStatus = useMemo(() => {
+    const hasRunning = events.some((event) => event.status === "running");
+    if (hasRunning) return "Acting";
+    if (status === "submitted" || status === "streaming") return "Thinking";
+    return "Idle";
+  }, [events, status]);
+
+  const [expandedEventId, setExpandedEventId] = useState<string | null>(null);
+
+  useEffect(() => {
+    const latestId = events.at(-1)?.id ?? null;
+    if (latestId) {
+      setExpandedEventId(latestId);
+    }
+  }, [events, activeSessionId]);
+
+  const renderEventDetails = (event: ToolEvent) => {
+    const payload = JSON.stringify(event.payload, null, 2);
+    const result = event.result ? JSON.stringify(event.result, null, 2) : "--";
+
+    return (
+      <div className="space-y-2">
+        <div className="text-xs text-zinc-500">Payload</div>
+        <pre className="text-xs bg-zinc-950 text-zinc-100 rounded-md p-3 overflow-x-auto">
+          {payload}
+        </pre>
+        <div className="text-xs text-zinc-500">Result</div>
+        <pre className="text-xs bg-zinc-950 text-zinc-100 rounded-md p-3 overflow-x-auto">
+          {result}
+        </pre>
       </div>
+    );
+  };
 
-      {/* Resizable Panels */}
-      <div className="w-full hidden xl:block">
+  return (
+    <div className="flex h-dvh relative bg-zinc-100">
+      <div className="w-full hidden lg:block">
         <ResizablePanelGroup direction="horizontal" className="h-full">
-          {/* Desktop Stream Panel */}
           <ResizablePanel
-            defaultSize={70}
-            minSize={40}
-            className="bg-black relative items-center justify-center"
+            defaultSize={38}
+            minSize={28}
+            className="flex flex-col border-r border-zinc-200 bg-white"
           >
-            {streamUrl ? (
-              <>
-                <iframe
-                  src={streamUrl}
-                  className="w-full h-full"
-                  style={{
-                    transformOrigin: "center",
-                    width: "100%",
-                    height: "100%",
-                  }}
-                  allow="autoplay"
-                />
-                <Button
-                  onClick={refreshDesktop}
-                  className="absolute top-2 right-2 bg-black/50 hover:bg-black/70 text-white px-3 py-1 rounded text-sm z-10"
-                  disabled={isInitializing}
-                >
-                  {isInitializing ? "Creating desktop..." : "New desktop"}
-                </Button>
-              </>
-            ) : (
-              <div className="flex items-center justify-center h-full text-white">
-                {isInitializing
-                  ? "Initializing desktop..."
-                  : "Loading stream..."}
+            <div className="flex items-center justify-between px-4 py-3 border-b border-zinc-200">
+              <div className="flex items-center gap-3">
+                <AISDKLogo />
+                <span className="text-xs text-zinc-500">{agentStatus}</span>
               </div>
-            )}
-          </ResizablePanel>
+              <div className="flex items-center gap-2">
+                <DeployButton />
+                <Button size="sm" variant="secondary" onClick={createSession}>
+                  <Plus className="h-4 w-4" />
+                  New
+                </Button>
+              </div>
+            </div>
 
-          <ResizableHandle withHandle />
-
-          {/* Chat Interface Panel */}
-          <ResizablePanel
-            defaultSize={30}
-            minSize={25}
-            className="flex flex-col border-l border-zinc-200"
-          >
-            <div className="bg-white py-4 px-4 flex justify-between items-center">
-              <AISDKLogo />
-              <DeployButton />
+            <div className="border-b border-zinc-200 px-4 py-3">
+              <div className="text-xs uppercase tracking-wide text-zinc-500 mb-2">
+                Sessions
+              </div>
+              <div className="flex flex-col gap-2 max-h-40 overflow-y-auto">
+                {sessions.map((session) => (
+                  <div
+                    key={session.id}
+                    className={cn(
+                      "flex items-center justify-between rounded-md border px-3 py-2 text-sm transition",
+                      session.id === activeSessionId
+                        ? "border-zinc-900 bg-zinc-900 text-white"
+                        : "border-zinc-200 bg-white hover:border-zinc-400",
+                    )}
+                  >
+                    <button
+                      type="button"
+                      className="flex-1 text-left"
+                      onClick={() => setActiveSessionId(session.id)}
+                    >
+                      <div className="font-medium line-clamp-1">
+                        {session.title}
+                      </div>
+                      <div
+                        className={cn(
+                          "text-xs",
+                          session.id === activeSessionId
+                            ? "text-zinc-200"
+                            : "text-zinc-500",
+                        )}
+                      >
+                        Updated {formatTimestamp(session.updatedAt)}
+                      </div>
+                    </button>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className={cn(
+                        "ml-2",
+                        session.id === activeSessionId
+                          ? "text-white hover:bg-white/10"
+                          : "text-zinc-500",
+                      )}
+                      onClick={() => deleteSession(session.id)}
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </Button>
+                  </div>
+                ))}
+              </div>
             </div>
 
             <div
@@ -246,7 +575,37 @@ export default function Chat() {
                 }
               />
             )}
-            <div className="bg-white">
+
+            <div className="border-t border-zinc-200 bg-white px-4 py-3">
+              <details className="group">
+                <summary className="flex cursor-pointer items-center justify-between text-sm font-medium text-zinc-700">
+                  Debug event store
+                  <span className="text-xs text-zinc-400">
+                    {events.length} events
+                  </span>
+                </summary>
+                <div className="mt-3 space-y-3">
+                  <div className="flex flex-wrap gap-2 text-xs text-zinc-600">
+                    {Object.entries(eventCounts).map(([type, count]) => (
+                      <span
+                        key={type}
+                        className="rounded-full border border-zinc-200 bg-white px-2 py-1"
+                      >
+                        {type}: {count}
+                      </span>
+                    ))}
+                    {Object.keys(eventCounts).length === 0 && (
+                      <span className="text-zinc-400">No events yet</span>
+                    )}
+                  </div>
+                  <pre className="max-h-48 overflow-y-auto rounded-md bg-zinc-950 p-3 text-xs text-zinc-100">
+                    {JSON.stringify(events.slice(-50), null, 2)}
+                  </pre>
+                </div>
+              </details>
+            </div>
+
+            <div className="bg-white border-t border-zinc-200">
               <form onSubmit={handleSubmit} className="p-4">
                 <Input
                   handleInputChange={handleInputChange}
@@ -259,53 +618,216 @@ export default function Chat() {
               </form>
             </div>
           </ResizablePanel>
+
+          <ResizableHandle withHandle />
+
+          <ResizablePanel
+            defaultSize={62}
+            minSize={40}
+            className="flex flex-col bg-zinc-950"
+          >
+            <div className="flex-1 relative min-h-[40%]">
+              <VncViewer
+                streamUrl={streamUrl}
+                isInitializing={isInitializing}
+                onRefresh={refreshDesktop}
+              />
+            </div>
+
+            <div className="border-t border-zinc-800 bg-zinc-900 p-4 text-zinc-100 max-h-[45%] overflow-y-auto">
+              <div className="flex items-center justify-between mb-4">
+                <div className="text-sm font-semibold">Tool call details</div>
+                <div className="text-xs text-zinc-400">
+                  {events.length} total
+                </div>
+              </div>
+              {events.length === 0 ? (
+                <div className="text-sm text-zinc-400">
+                  No tool calls captured yet.
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {events.slice(-30).map((event) => (
+                    <details
+                      key={event.id}
+                      className="rounded-md border border-zinc-800 bg-zinc-950"
+                      open={expandedEventId === event.id}
+                    >
+                      <summary
+                        className="flex cursor-pointer items-center justify-between px-3 py-2 text-sm"
+                        onClick={(evt) => {
+                          evt.preventDefault();
+                          setExpandedEventId((current) =>
+                            current === event.id ? null : event.id,
+                          );
+                        }}
+                      >
+                        <div>
+                          <div className="font-medium">
+                            {getEventType(event)}
+                          </div>
+                          <div className="text-xs text-zinc-400">
+                            {formatTimestamp(event.timestamp)} · {event.id}
+                          </div>
+                        </div>
+                        <div className="text-right">
+                          <div
+                            className={cn(
+                              "text-xs font-semibold",
+                              getStatusTone(event.status),
+                            )}
+                          >
+                            {event.status}
+                          </div>
+                          <div className="text-xs text-zinc-400">
+                            {formatDuration(event.durationMs)}
+                          </div>
+                        </div>
+                      </summary>
+                      <div className="border-t border-zinc-800 px-3 py-3">
+                        {renderEventDetails(event)}
+                      </div>
+                    </details>
+                  ))}
+                </div>
+              )}
+            </div>
+          </ResizablePanel>
         </ResizablePanelGroup>
       </div>
 
-      {/* Mobile View (Chat Only) */}
-      <div className="w-full xl:hidden flex flex-col">
-        <div className="bg-white py-4 px-4 flex justify-between items-center">
-          <AISDKLogo />
-          <DeployButton />
+      <div className="w-full lg:hidden flex flex-col">
+        <div className="flex items-center justify-between px-4 py-3 bg-white border-b border-zinc-200">
+          <div className="flex items-center gap-3">
+            <AISDKLogo />
+            <span className="text-xs text-zinc-500">{agentStatus}</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <Button
+              size="sm"
+              variant={mobileView === "chat" ? "default" : "secondary"}
+              onClick={() => setMobileView("chat")}
+            >
+              Chat
+            </Button>
+            <Button
+              size="sm"
+              variant={mobileView === "desktop" ? "default" : "secondary"}
+              onClick={() => setMobileView("desktop")}
+            >
+              Desktop
+            </Button>
+          </div>
         </div>
 
-        <div
-          className="flex-1 space-y-6 py-4 overflow-y-auto px-4"
-          ref={mobileContainerRef}
-        >
-          {messages.length === 0 ? <ProjectInfo /> : null}
-          {messages.map((message, i) => (
-            <PreviewMessage
-              message={message}
-              key={message.id}
-              isLoading={isLoading}
-              status={status}
-              isLatestMessage={i === messages.length - 1}
-            />
-          ))}
-          <div ref={mobileEndRef} className="pb-2" />
-        </div>
+        {mobileView === "chat" ? (
+          <>
+            <div className="border-b border-zinc-200 px-4 py-3">
+              <div className="flex items-center justify-between">
+                <div className="text-xs uppercase tracking-wide text-zinc-500">
+                  Sessions
+                </div>
+                <Button size="sm" variant="secondary" onClick={createSession}>
+                  <Plus className="h-4 w-4" />
+                  New
+                </Button>
+              </div>
+              <div className="mt-2 flex flex-col gap-2 max-h-32 overflow-y-auto">
+                {sessions.map((session) => (
+                  <div
+                    key={session.id}
+                    className={cn(
+                      "flex items-center justify-between rounded-md border px-3 py-2 text-sm",
+                      session.id === activeSessionId
+                        ? "border-zinc-900 bg-zinc-900 text-white"
+                        : "border-zinc-200 bg-white",
+                    )}
+                  >
+                    <button
+                      type="button"
+                      className="flex-1 text-left"
+                      onClick={() => setActiveSessionId(session.id)}
+                    >
+                      <div className="font-medium line-clamp-1">
+                        {session.title}
+                      </div>
+                      <div
+                        className={cn(
+                          "text-xs",
+                          session.id === activeSessionId
+                            ? "text-zinc-200"
+                            : "text-zinc-500",
+                        )}
+                      >
+                        Updated {formatTimestamp(session.updatedAt)}
+                      </div>
+                    </button>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className={cn(
+                        "ml-2",
+                        session.id === activeSessionId
+                          ? "text-white hover:bg-white/10"
+                          : "text-zinc-500",
+                      )}
+                      onClick={() => deleteSession(session.id)}
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            </div>
 
-        {messages.length === 0 && (
-          <PromptSuggestions
-            disabled={isInitializing}
-            submitPrompt={(prompt: string) =>
-              append({ role: "user", content: prompt })
-            }
-          />
-        )}
-        <div className="bg-white">
-          <form onSubmit={handleSubmit} className="p-4">
-            <Input
-              handleInputChange={handleInputChange}
-              input={input}
+            <div
+              className="flex-1 space-y-6 py-4 overflow-y-auto px-4 bg-white"
+              ref={desktopContainerRef}
+            >
+              {messages.length === 0 ? <ProjectInfo /> : null}
+              {messages.map((message, i) => (
+                <PreviewMessage
+                  message={message}
+                  key={message.id}
+                  isLoading={isLoading}
+                  status={status}
+                  isLatestMessage={i === messages.length - 1}
+                />
+              ))}
+              <div ref={desktopEndRef} className="pb-2" />
+            </div>
+
+            {messages.length === 0 && (
+              <PromptSuggestions
+                disabled={isInitializing}
+                submitPrompt={(prompt: string) =>
+                  append({ role: "user", content: prompt })
+                }
+              />
+            )}
+
+            <div className="border-t border-zinc-200 bg-white">
+              <form onSubmit={handleSubmit} className="p-4">
+                <Input
+                  handleInputChange={handleInputChange}
+                  input={input}
+                  isInitializing={isInitializing}
+                  isLoading={isLoading}
+                  status={status}
+                  stop={stop}
+                />
+              </form>
+            </div>
+          </>
+        ) : (
+          <div className="flex-1 bg-black">
+            <VncViewer
+              streamUrl={streamUrl}
               isInitializing={isInitializing}
-              isLoading={isLoading}
-              status={status}
-              stop={stop}
+              onRefresh={refreshDesktop}
             />
-          </form>
-        </div>
+          </div>
+        )}
       </div>
     </div>
   );
