@@ -71,14 +71,14 @@ const createSessionId = () => {
   return `session-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 };
 
+const isTextPart = (
+  part: MessagePart,
+): part is MessagePart & { type: "text"; text: string } =>
+  part.type === "text" && "text" in part && typeof part.text === "string";
+
 const extractMessageText = (message: Message): string | undefined => {
   if (typeof message.content === "string") return message.content;
-  const textPart = message.parts?.find(
-    (part) =>
-      part.type === "text" &&
-      "text" in part &&
-      typeof part.text === "string",
-  );
+  const textPart = message.parts?.find(isTextPart);
   return textPart?.text;
 };
 
