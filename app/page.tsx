@@ -74,7 +74,10 @@ const createSessionId = () => {
 const extractMessageText = (message: Message): string | undefined => {
   if (typeof message.content === "string") return message.content;
   const textPart = message.parts?.find(
-    (part) => part.type === "text" && typeof part.text === "string",
+    (part) =>
+      part.type === "text" &&
+      "text" in part &&
+      typeof part.text === "string",
   );
   return textPart?.text;
 };
