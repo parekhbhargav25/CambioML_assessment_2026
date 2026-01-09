@@ -154,7 +154,10 @@ const PurePreviewMessage = ({
                         break;
                     }
 
-                    const result = part.toolInvocation.result;
+                    const result =
+                      "result" in part.toolInvocation
+                        ? part.toolInvocation.result
+                        : undefined;
                     const hasImageResult =
                       typeof result === "object" &&
                       result !== null &&
