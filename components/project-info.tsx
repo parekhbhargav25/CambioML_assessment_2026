@@ -12,17 +12,20 @@ export const ProjectInfo = () => {
           <span>+</span>
           <ComputerIcon />
         </p>
-        <h3 className="text-center text-2xl font-bold">Computer Use Agent</h3>
+        <h3 className="text-center text-2xl font-bold">
+          Welcome to your AI workspace
+        </h3>
         <p>
-          This demo showcases a Computer Use Agent built with the{" "}
+          Ask anything and watch the agent carry out tasks on a live desktop. It
+          combines the{" "}
           <StyledLink href="https://sdk.vercel.ai">AI SDK</StyledLink>,{" "}
           <StyledLink href="https://www.anthropic.com/claude/sonnet">
             Anthropic Claude Sonnet 3.7
           </StyledLink>
-          , and <StyledLink href="https://e2b.dev">e2b desktop</StyledLink>.
+          , and <StyledLink href="https://e2b.dev">e2b desktop</StyledLink> to
+          help you move faster.
         </p>
         <p>
-          {" "}
           Learn more about{" "}
           <Link
             className="text-blue-500 dark:text-blue-400"
@@ -31,7 +34,7 @@ export const ProjectInfo = () => {
           >
             Computer Use{" "}
           </Link>
-          with the AI SDK.
+          and what you can build with it.
         </p>
       </div>
     </motion.div>
