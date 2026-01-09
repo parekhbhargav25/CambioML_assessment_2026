@@ -1,83 +1,82 @@
-<a href="https://ai-sdk-starter-groq.vercel.app">
-  <h1 align="center">AI SDK Computer Use Demo</h1>
-</a>
+Author: Bhargav Parekh
 
-<p align="center">
-  An open-source AI chatbot app template demonstrating Anthropic Claude 3.7 Sonnet's computer use capabilities, built with Next.js and the AI SDK by Vercel.
-</p>
+# AI SDK Computer Use Agent Dashboard
 
-<p align="center">
-  <a href="#features"><strong>Features</strong></a> ·
-  <a href="#deploy-your-own"><strong>Deploy Your Own</strong></a> ·
-  <a href="#running-locally"><strong>Running Locally</strong></a> ·
-  <a href="#authors"><strong>Authors</strong></a>
-</p>
-<br/>
+A production-ready AI agent dashboard built on the AI SDK computer use demo. It provides a two-panel workspace with chat, event tracing, and a live VNC desktop for tool-driven automation.
 
-## Features
+## Highlights
 
-- Streaming text responses powered by the [AI SDK by Vercel](https://sdk.vercel.ai/docs), allowing multiple AI providers to be used interchangeably with just a few lines of code.
-- Integration with Anthropic Claude 3.7 Sonnet's computer use tool and bash tool capabilities.
-- Sandbox environment with [e2b](https://e2b.dev) for secure execution.
-- [shadcn/ui](https://ui.shadcn.com/) components for a modern, responsive UI powered by [Tailwind CSS](https://tailwindcss.com).
-- Built with the latest [Next.js](https://nextjs.org) App Router.
+- Two-panel dashboard with resizable splits
+- Left panel: chat with inline tool call visualizations + collapsible debug event store
+- Right panel: live VNC desktop + expanded tool call details
+- Typed event pipeline (tool calls + results with timestamps, durations, status)
+- Multi-session chat history with localStorage persistence (create, switch, delete)
+- VNC viewer is memoized to avoid re-renders on chat updates
+- Mobile-friendly layout (toggle between Chat/Desktop)
 
-## Deploy Your Own
+## Tech Stack
 
-You can deploy your own version to Vercel by clicking the button below:
+- Next.js App Router (React)
+- AI SDK (`@ai-sdk/react` + `ai`)
+- Anthropic Claude via `@ai-sdk/anthropic`
+- e2b desktop for secure VNC sandbox
+- Tailwind CSS + shadcn/ui
 
-[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?project-name=AI+SDK+Computer+Use+Demo&repository-name=ai-sdk-computer-use&repository-url=https%3A%2F%2Fgithub.com%2Fvercel-labs%2Fai-sdk-computer-use&demo-title=AI+SDK+Computer+Use+Demo&demo-url=https%3A%2F%2Fai-sdk-computer-use.vercel.app%2F&demo-description=A+chatbot+application+built+with+Next.js+demonstrating+Anthropic+Claude+3.7+Sonnet%27s+computer+use+capabilities&env=ANTHROPIC_API_KEY,E2B_API_KEY)
+## Architecture Overview
 
-## Running Locally
+### UI Layout
+- `app/page.tsx` composes the dashboard using resizable panels.
+- Left panel: chat, sessions, and debug event store.
+- Right panel: VNC viewer with a resizable tool call detail pane.
 
-1. Clone the repository and install dependencies:
+### Event Pipeline
+- `lib/agent-events.ts` defines a typed event model:
+  - Tool payloads (computer/bash)
+  - Results (image/text/aborted)
+  - Status and duration
+- `app/page.tsx` scans tool invocation parts and dispatches call/result events into a reducer-backed store.
 
-   ```bash
-   npm install
-   # or
-   yarn install
-   # or
-   pnpm install
-   ```
+### Session Management
+- Sessions are persisted to `localStorage` under `computer-use:sessions`.
+- Each session stores messages, timestamps, and a derived title.
+- Users can create, switch, and delete sessions from the UI.
 
-2. Install the [Vercel CLI](https://vercel.com/docs/cli):
+### VNC Stability
+- `components/vnc-viewer.tsx` is memoized to prevent re-renders when chat updates.
 
-   ```bash
-   npm i -g vercel
-   # or
-   yarn global add vercel
-   # or
-   pnpm install -g vercel
-   ```
+## Local Development
 
-   Once installed, link your local project to your Vercel project:
+### Prerequisites
+- Node.js 18+
+- pnpm (recommended)
 
-   ```bash
-   vercel link
-   ```
+### Install
 
-   After linking, pull your environment variables:
+```bash
+pnpm install
+```
 
-   ```bash
-   vercel env pull
-   ```
+### Environment Variables
+Create `.env.local` and provide:
 
-   This will create a `.env.local` file with all the necessary environment variables.
+```
+ANTHROPIC_API_KEY=...
+E2B_API_KEY=...
+```
 
-3. Run the development server:
+### Run
 
-   ```bash
-   npm run dev
-   # or
-   yarn dev
-   # or
-   pnpm dev
-   ```
+```bash
+pnpm dev
+```
 
-4. Open [http://localhost:3000](http://localhost:3000) to view your new AI chatbot application.
+Open http://localhost:3000
 
-## Authors
+## Scripts
 
-This repository is maintained by the [Vercel](https://vercel.com) team and community contributors.
+- `pnpm dev` - start the development server
+- `pnpm build` - create a production build
+- `pnpm start` - start the production server
+- `pnpm lint` - run lint checks
 
-Contributions are welcome! Feel free to open issues or submit pull requests to enhance functionality or fix bugs.
+
