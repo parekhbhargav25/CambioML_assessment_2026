@@ -4,6 +4,10 @@ Author: Bhargav Parekh
 
 A production-ready AI agent dashboard built on the AI SDK computer use demo. It provides a two-panel workspace with chat, event tracing, and a live VNC desktop for tool-driven automation.
 
+## Demo
+
+https://www.youtube.com/watch?v=3FUttK8w400
+
 ## Highlights
 
 - Two-panel dashboard with resizable splits
@@ -78,5 +82,4 @@ Open http://localhost:3000
 - `pnpm build` - create a production build
 - `pnpm start` - start the production server
 - `pnpm lint` - run lint checks
-
 
