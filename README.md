@@ -6,7 +6,7 @@ A production-ready AI agent dashboard built on the AI SDK computer use demo. It 
 
 ## Demo
 
-https://www.youtube.com/watch?v=3FUttK8w400
+https://youtu.be/bfgjvrEK25g
 
 ## Highlights
 
